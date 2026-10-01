@@ -24,3 +24,5 @@ cookies.json
 data
 images
 SOURCE_MANIFEST.json
+
+**/.session-*

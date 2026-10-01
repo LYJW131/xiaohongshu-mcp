@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/headless_browser"
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
@@ -20,7 +19,8 @@ import (
 
 // XiaohongshuService 小红书业务服务
 type XiaohongshuService struct {
-	logins loginSessions
+	logins     loginSessions
+	loginSetup sync.Mutex
 }
 
 // NewXiaohongshuService 创建小红书服务实例
@@ -96,6 +96,9 @@ type UserProfileResponse struct {
 
 // DeleteCookies 删除 cookies 文件，用于登录重置
 func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
+	s.loginSetup.Lock()
+	defer s.loginSetup.Unlock()
+	s.logins.stop()
 	cookiePath := cookies.GetCookiesFilePath()
 	cookieLoader := cookies.NewLoadCookie(cookiePath)
 	return cookieLoader.DeleteCookies()
@@ -121,7 +124,13 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 	}
 
 	// 已登录时从当前页读取真实账号信息；读不到只记 warn，不影响状态返回。
+	if !isLoggedIn {
+		b.DisableCookieRefresh()
+	}
 	if isLoggedIn {
+		if err := b.RefreshCookies(); err != nil {
+			return nil, fmt.Errorf("登录状态持久化失败: %w", err)
+		}
 		if user, err := loginAction.CurrentUser(ctx); err != nil {
 			logrus.Warnf("failed to get current user info: %v", err)
 		} else {
@@ -135,28 +144,57 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 // GetLoginQrcode 获取登录的扫码二维码
 func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
+	s.loginSetup.Lock()
+	defer s.loginSetup.Unlock()
+	// 先作废旧二维码并等待其提交结束，再读取新浏览器的会话版本。
+	s.logins.stop()
+	resumeRefresh := browser.PauseCookieRefresh()
+	background := false
+	defer func() {
+		if !background {
+			resumeRefresh()
+		}
+	}()
 	b := newBrowser()
+	b.DisableCookieRefresh()
+	defer func() {
+		if !background {
+			b.Close()
+		}
+	}()
 	page := b.NewPage()
+	defer func() {
+		if !background {
+			_ = page.Close()
+		}
+	}()
 
 	deferFunc := func() {
+		defer resumeRefresh()
 		_ = page.Close()
 		b.Close()
 	}
 
 	loginAction := xiaohongshu.NewLogin(page)
 
-	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
-	if err != nil || loggedIn {
-		defer deferFunc()
-	}
+	setupCtx, cancelSetup := context.WithTimeout(ctx, 45*time.Second)
+	defer cancelSetup()
+	img, loggedIn, err := loginAction.FetchQrcodeImage(setupCtx)
 	if err != nil {
 		return nil, err
+	}
+
+	if loggedIn {
+		if err := b.SaveCookies(); err != nil {
+			return nil, fmt.Errorf("登录状态持久化失败: %w", err)
+		}
 	}
 
 	timeout := 4 * time.Minute
 
 	if !loggedIn {
-		s.waitScanInBackground(loginAction, page, deferFunc, timeout)
+		s.waitScanInBackground(loginAction, b.SaveCookies, deferFunc, timeout)
+		background = true
 	}
 
 	return &LoginQrcodeResponse{
@@ -176,7 +214,7 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 // 浏览器必须一直活着才检测得到扫码，所以这里不能提前关；但也不能任由它堆积——
 // 再取一次二维码就会把上一个还在等的会话关掉，同一时刻只留一个。
 func (s *XiaohongshuService) waitScanInBackground(
-	loginAction *xiaohongshu.LoginAction, page *rod.Page, closeBrowser func(), timeout time.Duration,
+	loginAction *xiaohongshu.LoginAction, save func() error, closeBrowser func(), timeout time.Duration,
 ) {
 	ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
 	seq := s.logins.start(cancel)
@@ -188,7 +226,7 @@ func (s *XiaohongshuService) waitScanInBackground(
 		defer s.logins.finish(seq)
 
 		if loginAction.WaitForLogin(ctxTimeout) {
-			if err := saveCookies(page); err != nil {
+			if err := s.logins.commit(seq, save); err != nil {
 				logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d: %v", seq, err)
 				return
 			}
@@ -617,26 +655,11 @@ func (s *XiaohongshuService) ReplyNotification(ctx context.Context, commentID, c
 	return xiaohongshu.NewNotificationAction(page).Reply(ctx, commentID, content)
 }
 
-func newBrowser() *headless_browser.Browser {
+func newBrowser() *browser.Browser {
 	return browser.NewBrowser(configs.IsHeadless(),
 		browser.WithFingerprintSeed(configs.FingerprintSeed()),
 		browser.WithProxy(configs.Proxy()),
 	)
-}
-
-func saveCookies(page *rod.Page) error {
-	cks, err := page.Browser().GetCookies()
-	if err != nil {
-		return err
-	}
-
-	data, err := json.Marshal(cks)
-	if err != nil {
-		return err
-	}
-
-	cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
-	return cookieLoader.SaveCookies(data)
 }
 
 // withBrowserPage 执行需要浏览器页面的操作的通用函数

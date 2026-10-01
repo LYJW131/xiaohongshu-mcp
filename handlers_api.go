@@ -77,11 +77,13 @@ func (s *AppServer) deleteCookiesHandler(c *gin.Context) {
 		return
 	}
 
-	cookiePath := cookies.GetCookiesFilePath()
-	respondSuccess(c, map[string]interface{}{
-		"cookie_path": cookiePath,
-		"message":     "Cookies 已成功删除，登录状态已重置。下次操作时需要重新登录。",
-	}, "删除 cookies 成功")
+	result := map[string]interface{}{"message": "Cookies 已成功删除，登录状态已重置。下次操作时需要重新登录。"}
+	if cookies.ExternalEnabled() {
+		result["storage"] = "durable-object"
+	} else {
+		result["cookie_path"] = cookies.GetCookiesFilePath()
+	}
+	respondSuccess(c, result, "删除 cookies 成功")
 }
 
 // publishHandler 发布内容

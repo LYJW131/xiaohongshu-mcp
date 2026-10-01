@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 // loginSessions 管理「已发出二维码、还在等扫码」的登录会话。
 //
@@ -39,4 +42,26 @@ func (l *loginSessions) finish(seq uint64) {
 	if l.seq == seq {
 		l.cancel = nil
 	}
+}
+
+// stop 先作废待扫码会话，防止退出后迟到的扫码结果恢复登录。
+func (l *loginSessions) stop() {
+	l.mu.Lock()
+	prev := l.cancel
+	l.seq++
+	l.cancel = nil
+	l.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+}
+
+// commit 与取消互斥；扫码结果只能提交到仍然有效的会话。
+func (l *loginSessions) commit(seq uint64, save func() error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seq != seq || l.cancel == nil {
+		return errors.New("login session superseded")
+	}
+	return save()
 }

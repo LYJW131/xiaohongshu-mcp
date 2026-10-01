@@ -1,4 +1,6 @@
 import { MAX_RUNTIME_MS, runSmokeTest, trialGate } from "./smoke.mjs";
+import { handleSessionRequest, installSessionBridge } from "./session.mjs";
+import { runPersistencePhases } from "./persistence-probe.mjs";
 
 // 依赖注入仅用于离线单测；生产基类为 Cloudflare DurableObject。
 export function createTrialClass(Base) {
@@ -10,6 +12,20 @@ export function createTrialClass(Base) {
       if (ctx.container?.running) {
         void ctx.blockConcurrencyWhile(() => ctx.container.setInactivityTimeout(60_000));
       }
+    }
+
+    async fetch() {
+      return new Response("Not found", { status: 404 });
+    }
+
+    sessionRequest(request) {
+      return handleSessionRequest(this.ctx.storage, request);
+    }
+
+    async sessionActivity() {
+      // 只保持现有任务的空闲窗口，不启动容器或修改硬截止时间。
+      if (this.ctx.container?.running) await this.ctx.container.setInactivityTimeout(60_000);
+      return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
     }
 
     run() {
@@ -33,21 +49,31 @@ export function createTrialClass(Base) {
       try {
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 6000) throw new Error("Insufficient approved time remaining");
-        const seconds = Math.floor(remainingMs / 1000) - 5;
-        container.start({
-          enableInternet: false,
-          entrypoint: ["/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", `${seconds}s`,
-            "/usr/bin/tini", "-s", "--", "./app"],
-          env: {
-            COOKIES_PATH: "/app/data/cookies.json", HOME: "/app/data/home",
-            XDG_CONFIG_HOME: "/app/data/config", XDG_CACHE_HOME: "/app/cache",
-          },
-        });
-        await container.setInactivityTimeout(60_000);
+        let operation;
+        if (this.env.TRIAL_MODE === "persistence") {
+          operation = runPersistencePhases(this.ctx, deadline, { sourceCommit: this.env.SOURCE_COMMIT });
+        } else {
+          // 拦截规则随容器停止失效，每次获批启动前重新安装。
+          await installSessionBridge(this.ctx);
+          if (deadline - Date.now() <= 6000) throw new Error("Insufficient approved time remaining");
+          const seconds = Math.floor((deadline - Date.now()) / 1000) - 5;
+          container.start({
+            enableInternet: false,
+            entrypoint: ["/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", `${seconds}s`,
+              "/usr/bin/tini", "-s", "--", "./app"],
+            env: {
+              COOKIES_PATH: "/app/data/cookies.json", HOME: "/app/data/home",
+              XDG_CONFIG_HOME: "/app/data/config", XDG_CACHE_HOME: "/app/cache",
+              XHS_SESSION_STORE: "cloudflare",
+            },
+          });
+          await container.setInactivityTimeout(60_000);
+          operation = runSmokeTest(container, this.env.SOURCE_COMMIT);
+        }
         const deadlineFailure = new Promise((_, reject) => {
           hardStop = setTimeout(() => reject(new Error("Trial deadline reached")), Math.max(1, deadline - Date.now()));
         });
-        const smoke = await Promise.race([runSmokeTest(container, this.env.SOURCE_COMMIT), deadlineFailure]);
+        const smoke = await Promise.race([operation, deadlineFailure]);
         Object.assign(result, smoke, { status: "passed" });
       } catch (error) {
         result.status = "failed";
@@ -55,7 +81,7 @@ export function createTrialClass(Base) {
       } finally {
         clearTimeout(hardStop);
         try {
-          await container.destroy("Bounded private smoke test completed");
+          await container.destroy("Bounded private trial completed");
           result.containerStopped = true;
           await this.ctx.storage.deleteAlarm();
         } catch {

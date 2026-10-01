@@ -1,10 +1,13 @@
 package browser
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
+	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/headless_browser"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
@@ -47,10 +50,107 @@ func maskProxyCredentials(proxyURL string) string {
 	return strings.Replace(proxyURL, u.User.String()+"@", cred+"@", 1)
 }
 
-func NewBrowser(headless bool, options ...Option) *headless_browser.Browser {
+// Browser 保存创建时读取的版本，旧浏览器不能覆盖新登录或退出状态。
+type Browser struct {
+	*headless_browser.Browser
+	store        cookies.Cookier
+	rodBrowser   *rod.Browser
+	mu           sync.Mutex
+	refresh      bool
+	closed       bool
+	stopActivity func()
+}
+
+func (b *Browser) NewPage() *rod.Page {
+	page := b.Browser.NewPage()
+	b.mu.Lock()
+	b.rodBrowser = page.Browser()
+	b.mu.Unlock()
+	return page
+}
+
+func (b *Browser) DisableCookieRefresh() { b.mu.Lock(); b.refresh = false; b.mu.Unlock() }
+
+// SaveCookies 等待持久化完成；登录成功必须显式调用并检查错误。
+func (b *Browser) SaveCookies() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.saveCookies()
+}
+
+// RefreshCookies 在后台扫码期间跳过普通刷新，扫码提交使用 SaveCookies。
+func (b *Browser) RefreshCookies() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return refreshCookies(b.saveCookies)
+}
+
+func (b *Browser) saveCookies() error {
+	if b.rodBrowser == nil {
+		return nil
+	}
+	cks, err := b.rodBrowser.GetCookies()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(cks)
+	if err != nil {
+		return err
+	}
+	if string(data) == "null" {
+		data = []byte("[]")
+	}
+	return b.store.SaveCookies(data)
+}
+
+func (b *Browser) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	b.closed = true
+	if b.stopActivity != nil {
+		defer b.stopActivity()
+	}
+	if b.refresh {
+		if err := refreshCookies(b.saveCookies); err != nil {
+			logrus.Errorf("刷新会话持久化失败: %v", err)
+		}
+	}
+	b.Browser.Close()
+}
+
+func NewBrowser(headless bool, options ...Option) *Browser {
+	stopActivity := cookies.KeepActive()
+	initialized := false
+	defer func() {
+		if !initialized {
+			stopActivity()
+		}
+	}()
 	cfg := &browserConfig{}
 	for _, opt := range options {
 		opt(cfg)
+	}
+
+	cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+	cookieData, cookieErr := cookieLoader.LoadCookies()
+	if cookieErr != nil {
+		if cookies.ExternalEnabled() {
+			panic(fmt.Sprintf("会话存储不可用，拒绝启动浏览器: %v", cookieErr))
+		}
+		logrus.Warnf("failed to load cookies: %v", cookieErr)
+	}
+	if cookies.ExternalEnabled() {
+		if seed := cookieLoader.LoadSeed(); seed > 0 {
+			cfg.fingerprintSeed = seed
+		}
+		if cfg.fingerprintSeed > 0 && cookieLoader.LoadSeed() == 0 {
+			if err := cookieLoader.SaveSeed(cfg.fingerprintSeed); err != nil {
+				panic("会话 seed 持久化失败")
+			}
+		}
 	}
 
 	// 只用内置浏览器，没有别的来源。二进制必须显式传给 go-rod，
@@ -86,16 +186,10 @@ func NewBrowser(headless bool, options ...Option) *headless_browser.Browser {
 		logrus.Infof("fingerprint seed pinned: %d", cfg.fingerprintSeed)
 	}
 
-	// 加载 cookies
-	cookiePath := cookies.GetCookiesFilePath()
-	cookieLoader := cookies.NewLoadCookie(cookiePath)
-
-	if data, err := cookieLoader.LoadCookies(); err == nil {
-		opts = append(opts, headless_browser.WithCookies(string(data)))
-		logrus.Debugf("loaded cookies from filesuccessfully")
-	} else {
-		logrus.Warnf("failed to load cookies: %v", err)
+	if len(cookieData) > 0 {
+		opts = append(opts, headless_browser.WithCookies(string(cookieData)))
 	}
-
-	return headless_browser.New(opts...)
+	b := headless_browser.New(opts...)
+	initialized = true
+	return &Browser{Browser: b, store: cookieLoader, refresh: cookies.ExternalEnabled(), stopActivity: stopActivity}
 }

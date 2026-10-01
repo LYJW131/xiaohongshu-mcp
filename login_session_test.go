@@ -77,3 +77,41 @@ func TestLoginSessions(t *testing.T) {
 		assert.Len(t, seen, n, "序号必须唯一，否则 finish 会误清别人的登记")
 	})
 }
+
+// 退出和新的二维码都必须使迟到的扫码结果失效。
+func TestLoginSessionCommitFencing(t *testing.T) {
+	var l loginSessions
+	calls := 0
+	save := func() error { calls++; return nil }
+	seq := l.start(func() {})
+	assert.NoError(t, l.commit(seq, save))
+	l.stop()
+	assert.Error(t, l.commit(seq, save))
+	newSeq := l.start(func() {})
+	assert.Error(t, l.commit(seq, save))
+	assert.NoError(t, l.commit(newSeq, save))
+	l.finish(newSeq)
+	assert.Error(t, l.commit(newSeq, save))
+	assert.Equal(t, 2, calls)
+}
+
+func TestLogoutWaitsForPendingCommit(t *testing.T) {
+	var l loginSessions
+	seq := l.start(func() {})
+	entered, release, committed, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = l.commit(seq, func() error { close(entered); <-release; return nil })
+		close(committed)
+	}()
+	<-entered
+	go func() { l.stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("logout overtook a pending commit")
+	default:
+	}
+	close(release)
+	<-committed
+	<-stopped
+	assert.Error(t, l.commit(seq, func() error { t.Fatal("stale commit called"); return nil }))
+}

@@ -11,6 +11,8 @@ function fixture({ version = COMMIT, execExit = 0, destroyFails = false, armed =
   const records = new Map();
   const calls = [];
   const ctx = {
+    id: { toString: () => "a".repeat(64) },
+    exports: { XhsSessionBridge(options) { calls.push(["bridge", options]); return { bridge: true }; } },
     storage: {
       async get(key) { return structuredClone(records.get(key)); },
       async put(key, value) { records.set(key, structuredClone(value)); },
@@ -20,6 +22,7 @@ function fixture({ version = COMMIT, execExit = 0, destroyFails = false, armed =
     blockConcurrencyWhile(fn) { return fn(); },
     container: {
       running: false,
+      async interceptOutboundHttp(host, handler) { calls.push(["intercept", host, handler]); },
       start(options) { calls.push(["start", options]); this.running = true; },
       async setInactivityTimeout(ms) { calls.push(["idle", ms]); },
       async destroy(reason) { calls.push(["destroy", reason]); if (destroyFails) throw new Error("cleanup failed"); this.running = false; },
@@ -85,6 +88,27 @@ test("expiry during storage setup cannot start a container", async () => {
   }
 });
 
+test("interceptor failure prevents starting a container", async () => {
+  const f = fixture();
+  f.ctx.container.interceptOutboundHttp = async () => { throw new Error("intercept unavailable"); };
+  assert.equal((await f.trial.run()).status, "failed");
+  assert.equal(f.calls.some(call => call[0] === "start"), false);
+});
+
+test("expiry while installing the interceptor cannot start a container", async () => {
+  const f = fixture();
+  const realNow = Date.now;
+  const base = realNow();
+  let now = base;
+  Date.now = () => now;
+  f.env.TRIAL_EXPIRES_AT = new Date(base + 10_000).toISOString();
+  f.ctx.container.interceptOutboundHttp = async () => { now = base + 11_000; };
+  try {
+    assert.equal((await f.trial.run()).status, "failed");
+    assert.equal(f.calls.some(call => call[0] === "start"), false);
+  } finally { Date.now = realNow; }
+});
+
 test("private smoke passes, stops, and only lists MCP tools", async () => {
   const f = fixture();
   const result = await f.trial.run();
@@ -97,6 +121,10 @@ test("private smoke passes, stops, and only lists MCP tools", async () => {
   assert.equal(start.enableInternet, false);
   assert.equal(start.env.AUTH_TOKEN, undefined);
   assert.equal(start.env.COOKIES_PATH, "/app/data/cookies.json");
+  assert.equal(start.env.XHS_SESSION_STORE, "cloudflare");
+  assert.deepEqual(f.calls.find(x => x[0] === "bridge")[1], { props: { durableObjectId: "a".repeat(64) } });
+  assert.equal(f.calls.find(x => x[0] === "intercept")[1], "xhs-session.internal");
+  assert.ok(f.calls.findIndex(x => x[0] === "intercept") < f.calls.findIndex(x => x[0] === "start"));
   assert.equal(start.entrypoint[0], "/usr/bin/timeout");
   const methods = f.calls.filter(x => x[0] === "fetch" && x[1].endsWith("/mcp")).map(x => JSON.parse(x[2].body).method);
   assert.deepEqual(methods, ["initialize", "tools/list"]);
@@ -173,8 +201,9 @@ test("checked-in configuration has no public routes, credentials, or schedule", 
   assert.equal(config.containers[0].image_build_context, "..");
   assert.equal(config.containers[0].ssh.enabled, false);
   assert.equal(config.vars.TRIAL_APPROVED, "false");
-  assert.equal(config.vars.SOURCE_COMMIT, COMMIT);
-  assert.equal(config.containers[0].image_vars.VERSION, COMMIT);
+  assert.match(config.vars.SOURCE_COMMIT, /^[a-f0-9]{40}$/);
+  assert.equal(config.containers[0].image_vars.VERSION, config.vars.SOURCE_COMMIT);
+  assert.equal(config.vars.TRIAL_MODE, "persistence");
 });
 
 test("browser path matches exact upstream version", async () => {

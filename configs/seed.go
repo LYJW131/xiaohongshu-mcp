@@ -33,6 +33,24 @@ func ResolveFingerprintSeed(store cookies.Cookier) int {
 	return seed
 }
 
+// ResolveFingerprintSeedStrict 用于外部会话，读写失败时不能随机降级。
+func ResolveFingerprintSeedStrict(store cookies.Cookier) (int, error) {
+	if err := cookies.VerifyStore(store); err != nil {
+		return 0, err
+	}
+	seed := FingerprintSeedFromEnv()
+	if seed == 0 {
+		seed = store.LoadSeed()
+	}
+	if seed == 0 {
+		seed = newSeed()
+	}
+	if err := store.SaveSeed(seed); err != nil {
+		return 0, err
+	}
+	return seed, nil
+}
+
 // newSeed 生成一个新的 seed。用 crypto/rand 而非 math/rand，
 // 避免进程启动时机相近的多个实例撞上同一个值。
 func newSeed() int {

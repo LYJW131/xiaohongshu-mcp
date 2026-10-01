@@ -15,6 +15,7 @@ COPY . .
 # VERSION 由 CI 通过 --build-arg 传入，本地构建默认 dev
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION}" -o /out/app .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION}" -o /out/sessionprobe ./cmd/sessionprobe
 
 # ---- run stage ----
 FROM ubuntu:22.04
@@ -106,6 +107,7 @@ RUN VER="$(cat /tmp/browser_version.txt | tr -d '[:space:]')" && \
     chmod -R 755 /app/cache
 
 COPY --from=builder /out/app .
+COPY --from=builder /out/sessionprobe .
 
 ENV HOME=/app/data/home
 ENV XDG_CONFIG_HOME=/app/data/config

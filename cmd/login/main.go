@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 
-	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
@@ -20,10 +18,21 @@ func main() {
 	// 登录与后续运行共用同一个 seed：首次登录生成并写入会话文件，之后一直复用。
 	store := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
 
+	var seed int
+	if cookies.ExternalEnabled() {
+		var err error
+		seed, err = configs.ResolveFingerprintSeedStrict(store)
+		if err != nil {
+			logrus.Fatalf("会话存储不可用: %v", err)
+		}
+	} else {
+		seed = configs.ResolveFingerprintSeed(store)
+	}
 	b := browser.NewBrowser(false,
-		browser.WithFingerprintSeed(configs.ResolveFingerprintSeed(store)),
+		browser.WithFingerprintSeed(seed),
 		browser.WithProxy(configs.ProxyFromEnv()),
 	)
+	b.DisableCookieRefresh()
 	defer b.Close()
 
 	page := b.NewPage()
@@ -47,7 +56,7 @@ func main() {
 	if err = action.Login(context.Background()); err != nil {
 		logrus.Fatalf("登录失败: %v", err)
 	} else {
-		if err := saveCookies(page); err != nil {
+		if err := b.SaveCookies(); err != nil {
 			logrus.Fatalf("failed to save cookies: %v", err)
 		}
 	}
@@ -64,19 +73,4 @@ func main() {
 		logrus.Error("登录流程完成但仍未登录")
 	}
 
-}
-
-func saveCookies(page *rod.Page) error {
-	cks, err := page.Browser().GetCookies()
-	if err != nil {
-		return err
-	}
-
-	data, err := json.Marshal(cks)
-	if err != nil {
-		return err
-	}
-
-	cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
-	return cookieLoader.SaveCookies(data)
 }

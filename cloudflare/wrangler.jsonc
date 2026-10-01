@@ -9,6 +9,7 @@
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
     "TRIAL_APPROVED": "false",
+    "TRIAL_MODE": "persistence",
     "TRIAL_EXPIRES_AT": "",
     "SOURCE_COMMIT": "a5c8f7799980ba1fdd501999843eb2d17e4c9a9f"
   },

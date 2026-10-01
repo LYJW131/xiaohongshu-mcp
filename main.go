@@ -29,6 +29,18 @@ func main() {
 
 	logrus.Infof("xiaohongshu-mcp version: %s", version)
 
+	// 外部会话必须先恢复并确认 seed 持久化，失败时停止启动。
+	store := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+	if cookies.ExternalEnabled() {
+		seed, err := configs.ResolveFingerprintSeedStrict(store)
+		if err != nil {
+			logrus.Fatalf("会话存储不可用，拒绝启动: %v", err)
+		}
+		configs.SetFingerprintSeed(seed)
+	} else {
+		configs.SetFingerprintSeed(configs.ResolveFingerprintSeed(store))
+	}
+
 	// 只用内置浏览器。启动时就备好，缺它直接退出，不拖到第一个请求才失败。
 	binPath, err := browser.EnsureBrowser()
 	if err != nil {
@@ -37,10 +49,7 @@ func main() {
 	logrus.Infof("using browser binary: %s", binPath)
 
 	configs.InitHeadless(headless)
-	// 入口层解析出 seed 和代理，经 configs 透传给浏览器工厂。
-	// seed 取值：环境变量 > 会话文件 > 新生成并写回，保证同一账号每次启动一致。
-	configs.SetFingerprintSeed(configs.ResolveFingerprintSeed(
-		cookies.NewLoadCookie(cookies.GetCookiesFilePath())))
+	// 入口层解析代理，经 configs 透传给浏览器工厂。
 	configs.SetProxy(configs.ProxyFromEnv())
 
 	// 初始化服务

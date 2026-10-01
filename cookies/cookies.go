@@ -13,7 +13,7 @@ import (
 // cookies 用 RawMessage 原样透传，不解析不重组，避免往返时字段走样。
 type sessionFile struct {
 	Version int             `json:"version"`
-	Seed    int             `json:"seed,omitempty"`
+	Seed    int             `json:"seed"`
 	SavedAt string          `json:"saved_at,omitempty"`
 	Cookies json.RawMessage `json:"cookies"`
 }
@@ -40,9 +40,13 @@ func NewLoadCookie(path string) Cookier {
 		panic("path is required")
 	}
 
-	return &localCookie{
-		path: path,
+	if mode := os.Getenv("XHS_SESSION_STORE"); mode != "" && mode != "cloudflare" {
+		panic("unsupported XHS_SESSION_STORE")
 	}
+	if ExternalEnabled() {
+		return newRemoteCookie(sessionEndpoint)
+	}
+	return &localCookie{path: path}
 }
 
 // LoadCookies 从文件中加载 cookies 数组的原始字节。
@@ -112,7 +116,23 @@ func (c *localCookie) write(cks []byte, seed int) error {
 		}
 	}
 
-	return os.WriteFile(c.path, data, 0644)
+	// 同目录临时文件 + rename，避免重启时读到半份会话。
+	f, err := os.CreateTemp(filepath.Dir(c.path), ".session-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(f.Name(), c.path)
 }
 
 // DeleteCookies 删除 cookies 文件。

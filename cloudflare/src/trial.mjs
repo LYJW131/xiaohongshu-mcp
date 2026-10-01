@@ -34,9 +34,16 @@ export function createTrialClass(Base) {
     }
 
     async runOnce() {
+      if (!trialGate(this.env, Date.now())) {
+        // 部署/计划调用可能留下平台分配的实例；未授权时也主动释放。
+        try {
+          await this.ctx.container?.destroy("Disarmed private trial");
+          await this.ctx.storage.deleteAlarm();
+        } catch { return { status: "cleanup-required", containerStopped: false }; }
+        return { status: "not-armed", containerStopped: true };
+      }
       const existing = await this.ctx.storage.get("trial");
       if (existing) return existing; // 崩溃或重复触发也绝不自动再开一台。
-      if (!trialGate(this.env, Date.now())) return { status: "not-armed" };
       const container = this.ctx.container;
       if (!container) throw new Error("Missing container binding");
       const startedAt = Date.now();

@@ -64,7 +64,23 @@ test("trial fails closed without approval and a future expiry", () => {
 test("disarmed trial never starts a container", async () => {
   const f = fixture({ armed: false });
   assert.equal((await f.trial.run()).status, "not-armed");
-  assert.equal(f.calls.length, 0);
+  assert.equal(f.calls.filter(call => call[0] === "start").length, 0);
+  assert.equal(f.calls.filter(call => call[0] === "destroy").length, 1);
+});
+
+test("disarmed invocation releases a preallocated instance without starting a trial", async () => {
+  const f = fixture({ armed: false });
+  f.ctx.container.running = true;
+  assert.equal((await f.trial.run()).status, "not-armed");
+  assert.equal(f.ctx.container.running, false);
+  assert.equal(f.calls.filter(call => call[0] === "start").length, 0);
+  assert.equal(f.records.has("trial"), false);
+});
+
+test("disarmed cleanup failure remains visible without starting", async () => {
+  const f = fixture({ armed: false, destroyFails: true });
+  assert.equal((await f.trial.run()).status, "cleanup-required");
+  assert.equal(f.calls.filter(call => call[0] === "start").length, 0);
 });
 
 test("expiry during storage setup cannot start a container", async () => {

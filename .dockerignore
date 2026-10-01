@@ -14,3 +14,13 @@ docker
 .DS_Store
 
 cookies.json
+
+# Cloudflare 构建不携带本地会话、密钥或 Node 构建目录。
+**/cookies.json
+**/.env*
+**/.dev.vars*
+**/node_modules
+**/.wrangler
+data
+images
+SOURCE_MANIFEST.json

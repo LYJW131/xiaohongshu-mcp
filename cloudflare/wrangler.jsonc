@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "xhs-container-trial-20261001",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    "TRIAL_APPROVED": "false",
+    "TRIAL_EXPIRES_AT": "",
+    "SOURCE_COMMIT": "a5c8f7799980ba1fdd501999843eb2d17e4c9a9f"
+  },
+  "triggers": { "crons": [] },
+  "containers": [{
+    "name": "xhs-container-trial-20261001",
+    "class_name": "XhsTrial",
+    "scheduling_policy": "default",
+    "image": "../Dockerfile",
+    "image_build_context": "..",
+    "image_vars": { "VERSION": "a5c8f7799980ba1fdd501999843eb2d17e4c9a9f" },
+    "instance_type": "standard-1",
+    "max_instances": 1,
+    "ssh": { "enabled": false }
+  }],
+  "durable_objects": {
+    "bindings": [{ "name": "XHS_TRIAL", "class_name": "XhsTrial" }]
+  },
+  "exports": { "XhsTrial": { "type": "durable-object", "storage": "sqlite" } }
+}

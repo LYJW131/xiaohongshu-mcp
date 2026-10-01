@@ -1,0 +1,82 @@
+import { MAX_RUNTIME_MS, runSmokeTest, trialGate } from "./smoke.mjs";
+
+// 依赖注入仅用于离线单测；生产基类为 Cloudflare DurableObject。
+export function createTrialClass(Base) {
+  return class extends Base {
+    currentRun;
+
+    constructor(ctx, env) {
+      super(ctx, env);
+      if (ctx.container?.running) {
+        void ctx.blockConcurrencyWhile(() => ctx.container.setInactivityTimeout(60_000));
+      }
+    }
+
+    run() {
+      this.currentRun ??= this.runOnce().finally(() => { this.currentRun = undefined; });
+      return this.currentRun;
+    }
+
+    async runOnce() {
+      const existing = await this.ctx.storage.get("trial");
+      if (existing) return existing; // 崩溃或重复触发也绝不自动再开一台。
+      if (!trialGate(this.env, Date.now())) return { status: "not-armed" };
+      const container = this.ctx.container;
+      if (!container) throw new Error("Missing container binding");
+      const startedAt = Date.now();
+      const deadline = Math.min(startedAt + MAX_RUNTIME_MS, Date.parse(this.env.TRIAL_EXPIRES_AT));
+      const result = { status: "running", startedAt, deadline, sourceCommit: this.env.SOURCE_COMMIT };
+      await this.ctx.storage.put("trial", result);
+      // alarm + 镜像内 timeout 双保险，不依赖公共 HTTP 请求续命。
+      await this.ctx.storage.setAlarm(deadline);
+      let hardStop;
+      try {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 6000) throw new Error("Insufficient approved time remaining");
+        const seconds = Math.floor(remainingMs / 1000) - 5;
+        container.start({
+          enableInternet: false,
+          entrypoint: ["/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", `${seconds}s`,
+            "/usr/bin/tini", "-s", "--", "./app"],
+          env: {
+            COOKIES_PATH: "/app/data/cookies.json", HOME: "/app/data/home",
+            XDG_CONFIG_HOME: "/app/data/config", XDG_CACHE_HOME: "/app/cache",
+          },
+        });
+        await container.setInactivityTimeout(60_000);
+        const deadlineFailure = new Promise((_, reject) => {
+          hardStop = setTimeout(() => reject(new Error("Trial deadline reached")), Math.max(1, deadline - Date.now()));
+        });
+        const smoke = await Promise.race([runSmokeTest(container, this.env.SOURCE_COMMIT), deadlineFailure]);
+        Object.assign(result, smoke, { status: "passed" });
+      } catch (error) {
+        result.status = "failed";
+        result.error = String(error?.message ?? error).slice(0, 500);
+      } finally {
+        clearTimeout(hardStop);
+        try {
+          await container.destroy("Bounded private smoke test completed");
+          result.containerStopped = true;
+          await this.ctx.storage.deleteAlarm();
+        } catch {
+          result.containerStopped = false;
+          result.status = "cleanup-required";
+        }
+        result.finishedAt = Date.now();
+        await this.ctx.storage.put("trial", result);
+        console.log(JSON.stringify({ event: "xhs-container-trial-result", ...result }));
+      }
+      return result;
+    }
+
+    async alarm() {
+      const record = await this.ctx.storage.get("trial");
+      if (!record) return;
+      await this.ctx.container?.destroy("Trial hard deadline");
+      await this.ctx.storage.put("trial", {
+        ...record, status: record.status === "running" ? "deadline-stopped" : record.status,
+        containerStopped: true, stoppedAt: Date.now(),
+      });
+    }
+  };
+}

@@ -4,6 +4,22 @@
 `a5c8f7799980ba1fdd501999843eb2d17e4c9a9f`，保留原 Go 源码和 Dockerfile。
 新增的 `cloudflare/Dockerfile` 仅将 Ubuntu 下载源保留为官方源并加下载超时，避免 Cloudflare 构建跨地域拉取阿里云镜像过慢；Go 程序、编译参数和浏览器版本均未改变。
 
+## 已验证结果（2026-10-01 UTC）
+
+真实 Cloudflare Containers 试跑已通过：
+
+- `standard-1` 的 Linux/amd64 镜像构建、发布、启动成功
+- `/health` 返回健康，程序版本匹配固定源提交
+- MCP `initialize` 成功，协商协议 `2025-03-26`
+- `tools/list` 返回 18 个工具
+- 项目自带浏览器成功打开 `about:blank`
+- 14:47:48.562 开始验收，14:47:57.146 完成并停止容器，历时 8.584 秒
+- 已移除临时 Cron、解除 Worker 激活，核验容器为 `inactive`
+
+本地模拟测试 15 项通过。上述结果不包含小红书账号登录、搜索/发布、cookies 持久化或空闲唤醒后恢复。
+
+注意：更新运行变量时，Cloudflare 的 script settings PATCH 会省略 `containers` 运行元数据，导致 `ctx.container` 缺失。应使用完整 Wrangler 部署或完整 Worker 上传，保留 `exports`、`containers`、绑定和原截止时间；上传后从 Worker version 读回 `resources.script_runtime.containers` 核验。
+
 ## 试跑范围
 
 - 独立 Worker / Container：`xhs-container-trial-20261001`

@@ -2,6 +2,7 @@
 
 基于 `LYJW131/xiaohongshu-mcp` 的固定提交
 `a5c8f7799980ba1fdd501999843eb2d17e4c9a9f`，保留原 Go 源码和 Dockerfile。
+新增的 `cloudflare/Dockerfile` 仅将 Ubuntu 下载源保留为官方源并加下载超时，避免 Cloudflare 构建跨地域拉取阿里云镜像过慢；Go 程序、编译参数和浏览器版本均未改变。
 
 ## 试跑范围
 
@@ -52,7 +53,7 @@ Deploy command:
 cd cloudflare && npx wrangler deploy
 ```
 
-首次构建会下载项目所需 Go 模块、Ubuntu 软件包以及项目自带的定制浏览器。
+首次构建会下载项目所需 Go 模块、Ubuntu 官方源软件包以及项目自带的定制浏览器。
 定制浏览器来自 `https://cdn.one-world.ai/browsers/148.0.7778.215/`，原 Dockerfile 校验同站发布的 SHA256。
 校验用于完整性检查，不等于独立安全审计。
 

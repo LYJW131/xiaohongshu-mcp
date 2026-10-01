@@ -169,6 +169,8 @@ test("checked-in configuration has no public routes, credentials, or schedule", 
   assert.deepEqual(config.triggers.crons, []);
   assert.equal(config.containers[0].max_instances, 1);
   assert.equal(config.containers[0].instance_type, "standard-1");
+  assert.equal(config.containers[0].image, "./Dockerfile");
+  assert.equal(config.containers[0].image_build_context, "..");
   assert.equal(config.containers[0].ssh.enabled, false);
   assert.equal(config.vars.TRIAL_APPROVED, "false");
   assert.equal(config.vars.SOURCE_COMMIT, COMMIT);
@@ -180,4 +182,13 @@ test("browser path matches exact upstream version", async () => {
   assert.equal(BROWSER_VERSION, upstreamVersion);
   assert.ok(BROWSER_COMMAND.includes("--no-sandbox"));
   assert.ok(BROWSER_COMMAND.includes("--disable-dev-shm-usage"));
+});
+
+test("Cloudflare Dockerfile preserves application build and browser source", async () => {
+  const file = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+  assert.equal(file.includes("mirrors.aliyun.com"), false);
+  assert.ok(file.includes("Acquire::http::Timeout=30"));
+  assert.ok(file.includes("CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build"));
+  assert.ok(file.includes("https://cdn.one-world.ai/browsers/${VER}"));
+  assert.ok(file.includes("sha256sum -c -"));
 });

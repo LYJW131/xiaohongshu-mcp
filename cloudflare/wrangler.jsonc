@@ -17,7 +17,7 @@
     "name": "xhs-container-trial-20261001",
     "class_name": "XhsTrial",
     "scheduling_policy": "default",
-    "image": "../Dockerfile",
+    "image": "./Dockerfile",
     "image_build_context": "..",
     "image_vars": { "VERSION": "a5c8f7799980ba1fdd501999843eb2d17e4c9a9f" },
     "instance_type": "standard-1",
